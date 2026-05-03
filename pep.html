@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="en-us">
 <head>
-    <base href="https://cdn.jsdelivr.net/gh/genizy/web-port@main/people-playground/">
     <meta charset="utf-8">
     <title>People Playground</title>
 
@@ -15,7 +14,6 @@ html, body {
     color: #fff;
     overflow: hidden;
 
-    /* disable text/image selection + highlight */
     user-select: none;
     -webkit-user-select: none;
     -ms-user-select: none;
@@ -101,112 +99,105 @@ canvas {
 </div>
 
 <script>
-const statusEl = document.getElementById("status");
-const bar = document.getElementById("progress-bar");
+const BASE = "https://raw.githubusercontent.com/genizy/web-port/main/people-playground/";
+
+const statusEl  = document.getElementById("status");
+const bar       = document.getElementById("progress-bar");
 const percentEl = document.getElementById("percent");
-const loader = document.getElementById("loader");
+const loader    = document.getElementById("loader");
 const unityContainer = document.getElementById("unity-container");
-const canvas = document.getElementById("unity-canvas");
+const canvas    = document.getElementById("unity-canvas");
 
 function setProgress(p) {
     bar.style.width = p + "%";
     percentEl.textContent = Math.floor(p) + "%";
 }
 
-async function fetchWithProgress(url, label) {
-    statusEl.textContent = label;
-
+async function fetchBlob(url) {
     const res = await fetch(url);
     if (!res.ok) throw new Error(url + " (" + res.status + ")");
 
     const reader = res.body.getReader();
     const contentLength = +res.headers.get('Content-Length') || 0;
-
     let received = 0;
     let chunks = [];
 
     while (true) {
-        const {done, value} = await reader.read();
+        const { done, value } = await reader.read();
         if (done) break;
-
         chunks.push(value);
         received += value.length;
-
-        if (contentLength) {
-            let percent = (received / contentLength) * 100;
-            setProgress(percent);
-        }
+        if (contentLength) setProgress((received / contentLength) * 100);
     }
 
     setProgress(100);
     return new Blob(chunks);
 }
 
-async function mergeParts(parts, label) {
+async function mergeParts(file, start, end, label) {
     let blobs = [];
-
-    for (let i = 0; i < parts.length; i++) {
-        statusEl.textContent = `${label} (${i+1}/${parts.length})`;
+    for (let i = start; i <= end; i++) {
+        statusEl.textContent = `${label} (${i}/${end})`;
         setProgress(0);
-
-        let blob = await fetchWithProgress(parts[i], `Loading ${parts[i]}`);
-        blobs.push(blob);
+        blobs.push(await fetchBlob(BASE + file + ".part" + i));
     }
-
     statusEl.textContent = `Merging ${label}...`;
-    setProgress(100);
-
     return URL.createObjectURL(new Blob(blobs));
 }
 
-function getParts(file, start, end) {
-    let arr = [];
-    for (let i = start; i <= end; i++) {
-        arr.push(file + ".part" + i);
-    }
-    return arr;
-}
-
-// Fetch the loader script as text and inject via a blob: URL so the browser
-// always treats it as JS regardless of what Content-Type the server sends.
-async function loadScript(url) {
-    statusEl.textContent = "Loading engine...";
-    setProgress(0);
-
+// Fetch any JS file as text and inject via blob: URL so raw GitHub's
+// text/plain Content-Type never blocks execution.
+async function fetchAndRunScript(url) {
     const res = await fetch(url);
-    if (!res.ok) throw new Error("Failed to fetch loader: " + res.status);
-
+    if (!res.ok) throw new Error("Failed to fetch: " + url + " (" + res.status + ")");
     const text = await res.text();
     const blob = new Blob([text], { type: "application/javascript" });
     const blobUrl = URL.createObjectURL(blob);
-
     return new Promise((resolve, reject) => {
         const script = document.createElement("script");
         script.src = blobUrl;
-        script.onload = () => { URL.revokeObjectURL(blobUrl); resolve(); };
-        script.onerror = () => { URL.revokeObjectURL(blobUrl); reject(new Error("Script execution failed")); };
+        script.onload  = () => { URL.revokeObjectURL(blobUrl); resolve(); };
+        script.onerror = () => { URL.revokeObjectURL(blobUrl); reject(new Error("Script failed: " + url)); };
         document.body.appendChild(script);
     });
 }
 
+// Fetch a JS file and return a blob: URL to pass into createUnityInstance
+// so the browser never tries to load it directly from raw GitHub.
+async function fetchScriptAsUrl(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Failed to fetch: " + url + " (" + res.status + ")");
+    const text = await res.text();
+    return URL.createObjectURL(new Blob([text], { type: "application/javascript" }));
+}
+
 async function start() {
     try {
-        const wasmUrl = await mergeParts(getParts("Build/PPG.wasm",1,3),"WASM");
-        const dataUrl = await mergeParts(getParts("Build/PPG.data",1,6),"DATA");
+        const wasmUrl  = await mergeParts("Build/PPG.wasm", 1, 3, "WASM");
+        const dataUrl  = await mergeParts("Build/PPG.data", 1, 6, "DATA");
 
-        await loadScript("Build/PPG.loader.js");
+        statusEl.textContent = "Fetching framework...";
+        setProgress(0);
+        const frameworkUrl = await fetchScriptAsUrl(BASE + "Build/PPG.framework.js");
+
+        statusEl.textContent = "Loading engine...";
+        setProgress(0);
+        await fetchAndRunScript(BASE + "Build/PPG.loader.js");
+
+        statusEl.textContent = "Initializing...";
+        setProgress(0);
 
         createUnityInstance(canvas, {
             dataUrl,
-            frameworkUrl: "Build/PPG.framework.js",
+            frameworkUrl,
             codeUrl: wasmUrl,
-            streamingAssetsUrl: "StreamingAssets",
+            streamingAssetsUrl: BASE + "StreamingAssets",
             companyName: "Studio Minus",
             productName: "People Playground",
             productVersion: "0"
         }, (progress) => {
             setProgress(progress * 100);
-            statusEl.textContent = "Initializing...";
+            statusEl.textContent = "Initializing... " + Math.floor(progress * 100) + "%";
         }).then(() => {
             loader.style.display = "none";
             unityContainer.style.display = "block";
